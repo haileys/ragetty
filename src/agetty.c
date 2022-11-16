@@ -2463,11 +2463,10 @@ static void __attribute__((__noreturn__)) usage(void)
     fputs(_("     --chdir <directory>    chdir before the login\n"), out);
     fputs(_("     --delay <number>       sleep seconds before prompt\n"), out);
     fputs(_("     --nice <number>        run login with this priority\n"), out);
-    fputs(_("     --reload               reload prompts on running agetty instances\n"), out);
+    fputs(_("     --reload               reload prompts on running ragetty instances\n"), out);
     fputs(_("     --list-speeds          display supported baud rates\n"), out);
     printf( "     --help                 %s\n", USAGE_OPTSTR_HELP);
     printf( "     --version              %s\n", USAGE_OPTSTR_VERSION);
-    printf(USAGE_MAN_TAIL("agetty(8)"));
 
     exit(EXIT_SUCCESS);
 }
