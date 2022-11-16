@@ -82,31 +82,4 @@ static inline ssize_t read_all(int fd, char *buf, size_t count)
     return c;
 }
 
-static inline ssize_t sendfile_all(int out, int in, off_t *off, size_t count)
-{
-#if defined(HAVE_SENDFILE) && defined(__linux__)
-    ssize_t ret;
-    ssize_t c = 0;
-    int tries = 0;
-    while (count) {
-        ret = sendfile(out, in, off, count);
-        if (ret < 0) {
-            if ((errno == EAGAIN || errno == EINTR) && (tries++ < 5)) {
-                xusleep(250000);
-                continue;
-            }
-            return c ? c : -1;
-        }
-        if (ret == 0)
-            return c;
-        tries = 0;
-        count -= ret;
-        c += ret;
-    }
-    return c;
-#else
-    errno = ENOSYS;
-    return -1;
-#endif
-}
 #endif /* UTIL_LINUX_ALL_IO_H */

@@ -260,14 +260,11 @@ static const struct Speedtab speedtab[] = {
 static void init_special_char(char* arg, struct options *op);
 static void parse_args(int argc, char **argv, struct options *op);
 static void parse_speeds(struct options *op, char *arg);
-static void update_utmp(struct options *op);
 static void open_tty(const char *tty, struct termios *tp, struct options *op);
 static void termio_init(struct options *op, struct termios *tp);
-static void reset_vc(const struct options *op, struct termios *tp, int canon);
+static void reset_vc(const struct options *op, struct termios *tp);
 static void auto_baud(struct termios *tp);
 static void list_speeds(void);
-static void output_special_char (struct issue *ie, unsigned char c, struct options *op,
-        struct termios *tp, FILE *fp);
 static void do_prompt(struct issue *ie, struct options *op, struct termios *tp);
 static void next_speed(struct options *op, struct termios *tp);
 static char *get_logname(struct issue *ie, struct options *op,
@@ -354,10 +351,6 @@ int main(int argc, char **argv)
 
     login_argv[login_argc++] = options.login;   /* set login program name */
 
-    /* Update the utmp file. */
-#ifdef  SYSV_STYLE
-    update_utmp(&options);
-#endif
     if (options.delay)
         sleep(options.delay);
 
@@ -465,7 +458,7 @@ int main(int argc, char **argv)
     if ((options.flags & F_VCONSOLE) == 0)
         termio_final(&options, &termios, &chardata);
     else
-        reset_vc(&options, &termios, 1);
+        reset_vc(&options, &termios);
 
     /* Now the newline character should be properly written. */
     write_all(STDOUT_FILENO, "\r\n", 2);
@@ -908,82 +901,6 @@ static void parse_speeds(struct options *op, char *arg)
     free(str);
 }
 
-#ifdef  SYSV_STYLE
-
-/* Update our utmp entry. */
-static void update_utmp(struct options *op)
-{
-    struct utmpx ut;
-    time_t t;
-    pid_t pid = getpid();
-    pid_t sid = getsid(0);
-    const char *vcline = op->vcline;
-    const char *line = op->tty;
-    struct utmpx *utp;
-
-    /*
-     * The utmp file holds miscellaneous information about things started by
-     * /sbin/init and other system-related events. Our purpose is to update
-     * the utmp entry for the current process, in particular the process type
-     * and the tty line we are listening to. Return successfully only if the
-     * utmp file can be opened for update, and if we are able to find our
-     * entry in the utmp file.
-     */
-    utmpxname(_PATH_UTMP);
-    setutxent();
-
-    /*
-     * Find my pid in utmp.
-     *
-     * FIXME: Earlier (when was that?) code here tested only utp->ut_type !=
-     * INIT_PROCESS, so maybe the >= here should be >.
-     *
-     * FIXME: The present code is taken from login.c, so if this is changed,
-     * maybe login has to be changed as well (is this true?).
-     */
-    while ((utp = getutxent()))
-        if (utp->ut_pid == pid
-                && utp->ut_type >= INIT_PROCESS
-                && utp->ut_type <= DEAD_PROCESS)
-            break;
-
-    if (utp) {
-        memcpy(&ut, utp, sizeof(ut));
-    } else {
-        /* Some inits do not initialize utmp. */
-        memset(&ut, 0, sizeof(ut));
-        if (vcline && *vcline)
-            /* Standard virtual console devices */
-            str2memcpy(ut.ut_id, vcline, sizeof(ut.ut_id));
-        else {
-            size_t len = strlen(line);
-            const char * ptr;
-            if (len >= sizeof(ut.ut_id))
-                ptr = line + len - sizeof(ut.ut_id);
-            else
-                ptr = line;
-            str2memcpy(ut.ut_id, ptr, sizeof(ut.ut_id));
-        }
-    }
-
-    str2memcpy(ut.ut_user, "LOGIN", sizeof(ut.ut_user));
-    str2memcpy(ut.ut_line, line, sizeof(ut.ut_line));
-    if (fakehost)
-        str2memcpy(ut.ut_host, fakehost, sizeof(ut.ut_host));
-    time(&t);
-    ut.ut_tv.tv_sec = t;
-    ut.ut_type = LOGIN_PROCESS;
-    ut.ut_pid = pid;
-    ut.ut_session = sid;
-
-    pututxline(&ut);
-    endutxent();
-
-    updwtmpx(_PATH_WTMP, &ut);
-}
-
-#endif              /* SYSV_STYLE */
-
 /* Set up tty as stdin, stdout & stderr. */
 static void open_tty(const char *tty, struct termios *tp, struct options *op)
 {
@@ -1238,7 +1155,7 @@ static void termio_init(struct options *op, struct termios *tp)
         setlocale(LC_CTYPE, "POSIX");
         op->flags &= ~F_UTF8;
 #endif
-        reset_vc(op, tp, 0);
+        reset_vc(op, tp);
 
         if ((tp->c_cflag & (CS8|PARODD|PARENB)) == CS8)
             op->flags |= F_EIGHTBITS;
@@ -1354,7 +1271,7 @@ static void termio_init(struct options *op, struct termios *tp)
 }
 
 /* Reset virtual console on stdin to its defaults */
-static void reset_vc(const struct options *op, struct termios *tp, int canon)
+static void reset_vc(const struct options *op, struct termios *tp)
 {
     int fl = 0;
 
@@ -1362,15 +1279,6 @@ static void reset_vc(const struct options *op, struct termios *tp, int canon)
     fl |= (op->flags & F_UTF8)       == 0 ? 0 : UL_TTY_UTF8;
 
     reset_virtual_console(tp, fl);
-
-#ifdef AGETTY_RELOAD
-    /*
-     * Discard all the flags that makes the line go canonical with echoing.
-     * We need to know when the user starts typing.
-     */
-    if (canon == 0)
-        tp->c_lflag = 0;
-#endif
 
     if (tcsetattr(STDIN_FILENO, TCSADRAIN, tp))
         log_warn(_("setting terminal attributes failed: %m"));
@@ -1457,108 +1365,6 @@ static char *xgethostname(void)
     return name;
 }
 
-static char *xgetdomainname(void)
-{
-    char *name;
-    const size_t sz = get_hostname_max() + 1;
-
-    name = malloc(sizeof(char) * sz);
-    if (!name)
-        log_err(_("failed to allocate memory: %m"));
-
-    if (getdomainname(name, sz) != 0) {
-        free(name);
-        return NULL;
-    }
-    name[sz - 1] = '\0';
-    return name;
-}
-
-
-static char *read_os_release(struct options *op, const char *varname)
-{
-    int fd = -1;
-    struct stat st;
-    size_t varsz = strlen(varname);
-    char *p, *buf = NULL, *ret = NULL;
-
-    /* read the file only once */
-    if (!op->osrelease) {
-        fd = open(_PATH_OS_RELEASE_ETC, O_RDONLY);
-        if (fd == -1) {
-            fd = open(_PATH_OS_RELEASE_USR, O_RDONLY);
-            if (fd == -1) {
-                log_warn(_("cannot open os-release file"));
-                return NULL;
-            }
-        }
-
-        if (fstat(fd, &st) < 0 || st.st_size > 4 * 1024 * 1024)
-            goto done;
-
-        op->osrelease = malloc(st.st_size + 1);
-        if (!op->osrelease)
-            log_err(_("failed to allocate memory: %m"));
-        if (read_all(fd, op->osrelease, st.st_size) != (ssize_t) st.st_size) {
-            free(op->osrelease);
-            op->osrelease = NULL;
-            goto done;
-        }
-        op->osrelease[st.st_size] = 0;
-    }
-    buf = strdup(op->osrelease);
-    if (!buf)
-        log_err(_("failed to allocate memory: %m"));
-    p = buf;
-
-    for (;;) {
-        char *eol, *eon;
-
-        p += strspn(p, "\n\r");
-        p += strspn(p, " \t\n\r");
-        if (!*p)
-            break;
-        if (strspn(p, "#;\n") != 0) {
-            p += strcspn(p, "\n\r");
-            continue;
-        }
-        if (strncmp(p, varname, varsz) != 0) {
-            p += strcspn(p, "\n\r");
-            continue;
-        }
-        p += varsz;
-        p += strspn(p, " \t\n\r");
-
-        if (*p != '=')
-            continue;
-
-        p += strspn(p, " \t\n\r=\"");
-        eol = p + strcspn(p, "\n\r");
-        *eol = '\0';
-        eon = eol-1;
-        while (eon > p) {
-            if (*eon == '\t' || *eon == ' ') {
-                eon--;
-                continue;
-            }
-            if (*eon == '"') {
-                *eon = '\0';
-                break;
-            }
-            break;
-        }
-        free(ret);
-        ret = strdup(p);
-        if (!ret)
-            log_err(_("failed to allocate memory: %m"));
-        p = eol + 1;
-    }
-done:
-    free(buf);
-    if (fd >= 0)
-        close(fd);
-    return ret;
-}
 
 #ifdef AGETTY_RELOAD
 static void open_netlink(void)
@@ -1696,78 +1502,6 @@ static int wait_for_term_input(int fd)
     }
 }
 #endif  /* AGETTY_RELOAD */
-
-#ifdef ISSUEDIR_SUPPORT
-static int issuedir_filter(const struct dirent *d)
-{
-    size_t namesz;
-
-#ifdef _DIRENT_HAVE_D_TYPE
-    if (d->d_type != DT_UNKNOWN && d->d_type != DT_REG &&
-        d->d_type != DT_LNK)
-        return 0;
-#endif
-    if (*d->d_name == '.')
-        return 0;
-
-    namesz = strlen(d->d_name);
-    if (!namesz || namesz < ISSUEDIR_EXTSIZ + 1 ||
-        strcmp(d->d_name + (namesz - ISSUEDIR_EXTSIZ), ISSUEDIR_EXT) != 0)
-        return 0;
-
-    /* Accept this */
-    return 1;
-}
-
-
-static int issuefile_read_stream(struct issue *ie, FILE *f, struct options *op, struct termios *tp);
-
-/* returns: 0 on success, 1 cannot open, <0 on error
- */
-static int issuedir_read(struct issue *ie, const char *dirname,
-             struct options *op, struct termios *tp)
-{
-        int dd, nfiles, i;
-        struct dirent **namelist = NULL;
-
-    dd = open(dirname, O_RDONLY|O_CLOEXEC|O_DIRECTORY);
-    if (dd < 0)
-        return 1;
-
-    nfiles = scandirat(dd, ".", &namelist, issuedir_filter, versionsort);
-    if (nfiles <= 0)
-        goto done;
-
-    ie->do_tcsetattr = 1;
-
-    for (i = 0; i < nfiles; i++) {
-        struct dirent *d = namelist[i];
-        FILE *f;
-
-        f = fopen_at(dd, d->d_name, O_RDONLY|O_CLOEXEC, "r" UL_CLOEXECSTR);
-        if (f) {
-            issuefile_read_stream(ie, f, op, tp);
-            fclose(f);
-        }
-    }
-
-    for (i = 0; i < nfiles; i++)
-        free(namelist[i]);
-    free(namelist);
-done:
-    close(dd);
-    return 0;
-}
-
-#else /* !ISSUEDIR_SUPPORT */
-static int issuedir_read(struct issue *ie __attribute__((__unused__)),
-            const char *dirname __attribute__((__unused__)),
-            struct options *op __attribute__((__unused__)),
-            struct termios *tp __attribute__((__unused__)))
-{
-    return 1;
-}
-#endif /* ISSUEDIR_SUPPORT */
 
 #ifndef ISSUE_SUPPORT
 static void print_issue_file(struct issue *ie __attribute__((__unused__)),
@@ -2530,303 +2264,6 @@ static void log_warn(const char *fmt, ...)
     va_start(ap, fmt);
     dolog(LOG_WARNING, fmt, ap);
     va_end(ap);
-}
-
-static void print_addr(struct issue *ie, sa_family_t family, void *addr)
-{
-    char buff[INET6_ADDRSTRLEN + 1];
-
-    inet_ntop(family, addr, buff, sizeof(buff));
-    fprintf(ie->output, "%s", buff);
-}
-
-/*
- * Prints IP for the specified interface (@iface), if the interface is not
- * specified then prints the "best" one (UP, RUNNING, non-LOOPBACK). If not
- * found the "best" interface then prints at least host IP.
- */
-static void output_iface_ip(struct issue *ie,
-                struct ifaddrs *addrs,
-                const char *iface,
-                sa_family_t family)
-{
-    struct ifaddrs *p;
-    struct addrinfo hints, *info = NULL;
-    char *host = NULL;
-    void *addr = NULL;
-
-    if (!addrs)
-        return;
-
-    for (p = addrs; p; p = p->ifa_next) {
-
-        if (!p->ifa_name ||
-            !p->ifa_addr ||
-            p->ifa_addr->sa_family != family)
-            continue;
-
-        if (iface) {
-            /* Filter out by interface name */
-               if (strcmp(p->ifa_name, iface) != 0)
-                continue;
-        } else {
-            /* Select the "best" interface */
-            if ((p->ifa_flags & IFF_LOOPBACK) ||
-                !(p->ifa_flags & IFF_UP) ||
-                !(p->ifa_flags & IFF_RUNNING))
-                continue;
-        }
-
-        addr = NULL;
-        switch (p->ifa_addr->sa_family) {
-        case AF_INET:
-            addr = &((struct sockaddr_in *) p->ifa_addr)->sin_addr;
-            break;
-        case AF_INET6:
-            addr = &((struct sockaddr_in6 *) p->ifa_addr)->sin6_addr;
-            break;
-        }
-
-        if (addr) {
-            print_addr(ie, family, addr);
-            return;
-        }
-    }
-
-    if (iface)
-        return;
-
-    /* Hmm.. not found the best interface, print host IP at least */
-    memset(&hints, 0, sizeof(hints));
-    hints.ai_family = family;
-    if (family == AF_INET6)
-        hints.ai_flags = AI_V4MAPPED;
-
-    host = xgethostname();
-    if (host && getaddrinfo(host, NULL, &hints, &info) == 0 && info) {
-        switch (info->ai_family) {
-        case AF_INET:
-            addr = &((struct sockaddr_in *) info->ai_addr)->sin_addr;
-            break;
-        case AF_INET6:
-            addr = &((struct sockaddr_in6 *) info->ai_addr)->sin6_addr;
-            break;
-        }
-        if (addr)
-            print_addr(ie, family, addr);
-
-        freeaddrinfo(info);
-    }
-    free(host);
-}
-
-/*
- * parses \x{argument}, if not argument specified then returns NULL, the @fd
- * has to point to one char after the sequence (it means '{').
- */
-static char *get_escape_argument(FILE *fd, char *buf, size_t bufsz)
-{
-    size_t i = 0;
-    int c = fgetc(fd);
-
-    if (c == EOF || (unsigned char) c != '{') {
-        ungetc(c, fd);
-        return NULL;
-    }
-
-    do {
-        c = fgetc(fd);
-        if (c == EOF)
-            return NULL;
-        if ((unsigned char) c != '}' && i < bufsz - 1)
-            buf[i++] = (unsigned char) c;
-
-    } while ((unsigned char) c != '}');
-
-    buf[i] = '\0';
-    return buf;
-}
-
-static void output_special_char(struct issue *ie,
-                unsigned char c,
-                struct options *op,
-                struct termios *tp,
-                FILE *fp)
-{
-    struct utsname uts;
-
-    switch (c) {
-    case 'e':
-    {
-        char escname[UL_COLORNAME_MAXSZ];
-
-        if (get_escape_argument(fp, escname, sizeof(escname))) {
-            const char *esc = color_sequence_from_colorname(escname);
-            if (esc)
-                fputs(esc, ie->output);
-        } else
-            fputs("\033", ie->output);
-        break;
-    }
-    case 's':
-        uname(&uts);
-        fprintf(ie->output, "%s", uts.sysname);
-        break;
-    case 'n':
-        uname(&uts);
-        fprintf(ie->output, "%s", uts.nodename);
-        break;
-    case 'r':
-        uname(&uts);
-        fprintf(ie->output, "%s", uts.release);
-        break;
-    case 'v':
-        uname(&uts);
-        fprintf(ie->output, "%s", uts.version);
-        break;
-    case 'm':
-        uname(&uts);
-        fprintf(ie->output, "%s", uts.machine);
-        break;
-    case 'o':
-    {
-        char *dom = xgetdomainname();
-
-        fputs(dom ? dom : "unknown_domain", ie->output);
-        free(dom);
-        break;
-    }
-    case 'O':
-    {
-        char *dom = NULL;
-        char *host = xgethostname();
-        struct addrinfo hints, *info = NULL;
-
-        memset(&hints, 0, sizeof(hints));
-        hints.ai_flags = AI_CANONNAME;
-
-        if (host && getaddrinfo(host, NULL, &hints, &info) == 0 && info) {
-            char *canon;
-
-            if (info->ai_canonname &&
-                (canon = strchr(info->ai_canonname, '.')))
-                dom = canon + 1;
-        }
-        fputs(dom ? dom : "unknown_domain", ie->output);
-        if (info)
-            freeaddrinfo(info);
-        free(host);
-        break;
-    }
-    case 'd':
-    case 't':
-    {
-        time_t now;
-        struct tm tm;
-
-        time(&now);
-        localtime_r(&now, &tm);
-
-        if (c == 'd') /* ISO 8601 */
-            fprintf(ie->output, "%s %s %2d  %d",
-                      nl_langinfo(ABDAY_1 + tm.tm_wday),
-                      nl_langinfo(ABMON_1 + tm.tm_mon),
-                      tm.tm_mday,
-                      tm.tm_year < 70 ? tm.tm_year + 2000 :
-                      tm.tm_year + 1900);
-        else
-            fprintf(ie->output, "%02d:%02d:%02d",
-                      tm.tm_hour, tm.tm_min, tm.tm_sec);
-        break;
-    }
-    case 'l':
-        fprintf (ie->output, "%s", op->tty);
-        break;
-    case 'b':
-    {
-        const speed_t speed = cfgetispeed(tp);
-        int i;
-
-        for (i = 0; speedtab[i].speed; i++) {
-            if (speedtab[i].code == speed) {
-                fprintf(ie->output, "%ld", speedtab[i].speed);
-                break;
-            }
-        }
-        break;
-    }
-    case 'S':
-    {
-        char *var = NULL, varname[64];
-
-        /* \S{varname} */
-        if (get_escape_argument(fp, varname, sizeof(varname))) {
-            var = read_os_release(op, varname);
-            if (var) {
-                if (strcmp(varname, "ANSI_COLOR") == 0)
-                    fprintf(ie->output, "\033[%sm", var);
-                else
-                    fputs(var, ie->output);
-            }
-        /* \S */
-        } else if ((var = read_os_release(op, "PRETTY_NAME"))) {
-            fputs(var, ie->output);
-
-        /* \S and PRETTY_NAME not found */
-        } else {
-            uname(&uts);
-            fputs(uts.sysname, ie->output);
-        }
-
-        free(var);
-
-        break;
-    }
-    case 'u':
-    case 'U':
-    {
-        int users = 0;
-        struct utmpx *ut;
-        setutxent();
-        while ((ut = getutxent()))
-            if (ut->ut_type == USER_PROCESS)
-                users++;
-        endutxent();
-        if (c == 'U')
-            fprintf(ie->output, P_("%d user", "%d users", users), users);
-        else
-            fprintf (ie->output, "%d ", users);
-        break;
-    }
-#if defined(RTMGRP_IPV4_IFADDR) && defined(RTMGRP_IPV6_IFADDR)
-    case '4':
-    case '6':
-    {
-        sa_family_t family = c == '4' ? AF_INET : AF_INET6;
-        struct ifaddrs *addrs = NULL;
-        char iface[128];
-
-        if (getifaddrs(&addrs))
-            break;
-
-        if (get_escape_argument(fp, iface, sizeof(iface)))
-            output_iface_ip(ie, addrs, iface, family);
-        else
-            output_iface_ip(ie, addrs, NULL, family);
-
-        freeifaddrs(addrs);
-
-        if (c == '4')
-            netlink_groups |= RTMGRP_IPV4_IFADDR;
-        else
-            netlink_groups |= RTMGRP_IPV6_IFADDR;
-        break;
-    }
-#endif
-    default:
-        putc(c, ie->output);
-        break;
-    }
 }
 
 static void init_special_char(char* arg, struct options *op)
