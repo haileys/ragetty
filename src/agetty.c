@@ -1,3 +1,6 @@
+#define _PATH_RUNSTATEDIR "/run"
+#define PACKAGE_STRING "ragetty"
+
 #include "agetty.h"
 
 /*
@@ -39,6 +42,7 @@
 #include <ifaddrs.h>
 #include <net/if.h>
 #include <sys/utsname.h>
+#include <sys/syslog.h>
 
 #include "strutils.h"
 #include "all-io.h"
@@ -57,72 +61,14 @@
 # include "plymouth-ctrl.h"
 #endif
 
-#ifdef HAVE_SYS_PARAM_H
 # include <sys/param.h>
-#endif
 
-#ifdef HAVE_GETTTYNAM
 # include <ttyent.h>
-#endif
 
-#if defined(__FreeBSD_kernel__)
-# include <pty.h>
-# ifdef HAVE_UTMP_H
-#  include <utmp.h>
-# endif
-# ifdef HAVE_LIBUTIL_H
-#  include <libutil.h>
-# endif
-#endif
-
-#ifdef __linux__
 #  include <sys/kd.h>
 #  define USE_SYSLOG
-#  ifndef DEFAULT_VCTERM
 #    define DEFAULT_VCTERM "linux"
-#  endif
-#  if defined (__s390__) || defined (__s390x__)
-#    define DEFAULT_TTYS0  "dumb"
-#    define DEFAULT_TTY32  "ibm327x"
-#    define DEFAULT_TTYS1  "vt220"
-#  endif
-#  ifndef DEFAULT_STERM
 #    define DEFAULT_STERM  "vt102"
-#  endif
-#elif defined(__GNU__)
-#  define USE_SYSLOG
-#  ifndef DEFAULT_VCTERM
-#    define DEFAULT_VCTERM "hurd"
-#  endif
-#  ifndef DEFAULT_STERM
-#    define DEFAULT_STERM  "vt102"
-#  endif
-#else
-#  ifndef DEFAULT_VCTERM
-#    define DEFAULT_VCTERM "vt100"
-#  endif
-#  ifndef DEFAULT_STERM
-#    define DEFAULT_STERM  "vt100"
-#  endif
-#endif
-
-#ifdef __FreeBSD_kernel__
-#define USE_SYSLOG
-#endif
-
-/* If USE_SYSLOG is undefined all diagnostics go to /dev/console. */
-#ifdef  USE_SYSLOG
-#  include <syslog.h>
-#endif
-
-/*
- * Some heuristics to find out what environment we are in: if it is not
- * System V, assume it is SunOS 4. The LOGIN_PROCESS is defined in System V
- * utmp.h, which will select System V style getty.
- */
-#ifdef LOGIN_PROCESS
-#  define SYSV_STYLE
-#endif
 
 /*
  * Things you may want to modify.
@@ -135,18 +81,6 @@
  * below. Note, however, that DEL cannot be used for interrupt generation
  * and for line editing at the same time.
  */
-
-/* Displayed before the login prompt. */
-#ifdef  SYSV_STYLE
-#  define ISSUE_SUPPORT
-#  if defined(HAVE_SCANDIRAT) && defined(HAVE_OPENAT)
-#    include <dirent.h>
-#    include "fileutils.h"
-#    define ISSUEDIR_SUPPORT
-#    define ISSUEDIR_EXT    ".issue"
-#    define ISSUEDIR_EXTSIZ (sizeof(ISSUEDIR_EXT) - 1)
-#  endif
-#endif
 
 /* Login prompt. */
 #define LOGIN_PROMPT        "login: "
@@ -699,9 +633,7 @@ static void output_version(void)
 #ifdef USE_SYSLOG
         "syslog",
 #endif
-#ifdef HAVE_WIDECHAR
         "widechar",
-#endif
         NULL
     };
     unsigned int i;
@@ -1187,7 +1119,6 @@ static void open_tty(const char *tty, struct termios *tp, struct options *op)
     if (tcgetattr(STDIN_FILENO, tp) < 0)
         log_err(_("%s: failed to get terminal attributes: %m"), tty);
 
-#ifdef HAVE_GETTTYNAM
     if (!op->term) {
         struct ttyent *ent = getttynam(tty);
         /* a bit nasty as it's never freed */
@@ -1197,7 +1128,6 @@ static void open_tty(const char *tty, struct termios *tp, struct options *op)
                 log_err(_("failed to allocate memory: %m"));
         }
     }
-#endif
 
 #if defined (__s390__) || defined (__s390x__)
     if (!op->term) {
@@ -1391,9 +1321,7 @@ static void termio_init(struct options *op, struct termios *tp)
         break;
     }
 
-#ifdef HAVE_STRUCT_TERMIOS_C_LINE
     tp->c_line = 0;
-#endif
     tp->c_cc[VMIN] = 1;
     tp->c_cc[VTIME] = 0;
 
@@ -1531,7 +1459,6 @@ static char *xgethostname(void)
 
 static char *xgetdomainname(void)
 {
-#ifdef HAVE_GETDOMAINNAME
     char *name;
     const size_t sz = get_hostname_max() + 1;
 
@@ -1545,9 +1472,6 @@ static char *xgetdomainname(void)
     }
     name[sz - 1] = '\0';
     return name;
-#else
-    return NULL;
-#endif
 }
 
 
@@ -2334,7 +2258,6 @@ static char *get_logname(struct issue *ie, struct options *op, struct termios *t
         }
     }
 
-#ifdef HAVE_WIDECHAR
     if ((op->flags & (F_EIGHTBITS|F_UTF8)) == (F_EIGHTBITS|F_UTF8)) {
         /* Check out UTF-8 multibyte characters */
         ssize_t len;
@@ -2360,7 +2283,6 @@ static char *get_logname(struct issue *ie, struct options *op, struct termios *t
         }
         free(wcs);
     } else
-#endif
     if ((op->flags & F_LCUC) && (cp->capslock = caps_lock(logname))) {
 
         /* Handle names with upper case and no lower case. */

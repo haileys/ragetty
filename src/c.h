@@ -21,21 +21,13 @@
 
 #include <assert.h>
 
-#ifdef HAVE_ERR_H
 # include <err.h>
-#endif
 
-#ifdef HAVE_SYS_SYSMACROS_H
 # include <sys/sysmacros.h>     /* for major, minor */
-#endif
 
-#ifndef LOGIN_NAME_MAX
 # define LOGIN_NAME_MAX 256
-#endif
 
-#ifndef NAME_MAX
 # define NAME_MAX PATH_MAX
-#endif
 
 /*
  * __GNUC_PREREQ is deprecated in favour of __has_attribute() and
@@ -185,11 +177,7 @@
 
 
 #ifndef cmp_stat_mtime
-# ifdef HAVE_STRUCT_STAT_ST_MTIM_TV_NSEC
 #  define cmp_stat_mtime(_a, _b, CMP)   cmp_timespec(&(_a)->st_mtim, &(_b)->st_mtim, CMP)
-# else
-#  define cmp_stat_mtime(_a, _b, CMP)   ((_a)->st_mtime CMP (_b)->st_mtime)
-# endif
 #endif
 
 
@@ -209,77 +197,8 @@
     (type *)( (char *)__mptr - offsetof(type,member) );})
 #endif
 
-#ifndef HAVE_PROGRAM_INVOCATION_SHORT_NAME
-# ifdef HAVE___PROGNAME
 extern char *__progname;
 #  define program_invocation_short_name __progname
-# else
-#  ifdef HAVE_GETEXECNAME
-#   define program_invocation_short_name \
-        prog_inv_sh_nm_from_file(getexecname(), 0)
-#  else
-#   define program_invocation_short_name \
-        prog_inv_sh_nm_from_file(__FILE__, 1)
-#  endif
-static char prog_inv_sh_nm_buf[256];
-static inline char *
-prog_inv_sh_nm_from_file(char *f, char stripext)
-{
-    char *t;
-
-    if ((t = strrchr(f, '/')) != NULL)
-        t++;
-    else
-        t = f;
-
-    strncpy(prog_inv_sh_nm_buf, t, sizeof(prog_inv_sh_nm_buf) - 1);
-    prog_inv_sh_nm_buf[sizeof(prog_inv_sh_nm_buf) - 1] = '\0';
-
-    if (stripext && (t = strrchr(prog_inv_sh_nm_buf, '.')) != NULL)
-        *t = '\0';
-
-    return prog_inv_sh_nm_buf;
-}
-# endif
-#endif
-
-
-#ifndef HAVE_ERR_H
-static inline void __attribute__ ((__format__ (__printf__, 4, 5)))
-errmsg(char doexit, int excode, char adderr, const char *fmt, ...)
-{
-    fprintf(stderr, "%s: ", program_invocation_short_name);
-    if (fmt != NULL) {
-        va_list argp;
-        va_start(argp, fmt);
-        vfprintf(stderr, fmt, argp);
-        va_end(argp);
-        if (adderr)
-            fprintf(stderr, ": ");
-    }
-    if (adderr)
-        fprintf(stderr, "%m");
-    fprintf(stderr, "\n");
-    if (doexit)
-        exit(excode);
-}
-
-#ifndef HAVE_ERR
-# define err(E, FMT...) errmsg(1, E, 1, FMT)
-#endif
-
-#ifndef HAVE_ERRX
-# define errx(E, FMT...) errmsg(1, E, 0, FMT)
-#endif
-
-#ifndef HAVE_WARN
-# define warn(FMT...) errmsg(0, 0, 1, FMT)
-#endif
-
-#ifndef HAVE_WARNX
-# define warnx(FMT...) errmsg(0, 0, 0, FMT)
-#endif
-#endif /* !HAVE_ERR_H */
 
 
 /* Don't use inline function to avoid '#include "nls.h"' in c.h
@@ -301,10 +220,6 @@ static inline __attribute__((const)) int is_power_of_2(unsigned long num)
 {
     return (num != 0 && ((num & (num - 1)) == 0));
 }
-
-#ifndef HAVE_LOFF_T
-typedef int64_t loff_t;
-#endif
 
 #if !defined(HAVE_DIRFD) && (!defined(HAVE_DECL_DIRFD) || HAVE_DECL_DIRFD == 0) && defined(HAVE_DIR_DD_FD)
 #include <sys/types.h>
@@ -390,17 +305,11 @@ fail:
 
 static inline int xusleep(useconds_t usec)
 {
-#ifdef HAVE_NANOSLEEP
     struct timespec waittime = {
         .tv_sec   =  usec / 1000000L,
         .tv_nsec  = (usec % 1000000L) * 1000
     };
     return nanosleep(&waittime, NULL);
-#elif defined(HAVE_USLEEP)
-    return usleep(usec);
-#else
-# error "System with usleep() or nanosleep() required!"
-#endif
 }
 
 /*

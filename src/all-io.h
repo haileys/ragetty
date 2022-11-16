@@ -13,9 +13,7 @@
 #include <unistd.h>
 #include <errno.h>
 #include <sys/types.h>
-#ifdef HAVE_SYS_SENDFILE_H
 # include <sys/sendfile.h>
-#endif
 
 #include "c.h"
 

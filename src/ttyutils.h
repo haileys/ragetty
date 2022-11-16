@@ -10,12 +10,8 @@
 #include <stdlib.h>
 #include <termios.h>
 #include <limits.h>
-#ifdef HAVE_SYS_IOCTL_H
 #include <sys/ioctl.h>
-#endif
-#ifdef HAVE_SYS_TTYDEFAULTS_H
 #include <sys/ttydefaults.h>
-#endif
 
 #ifdef USE_TTY_GROUP
 # define TTY_MODE 0620
