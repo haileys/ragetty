@@ -288,6 +288,141 @@ static void eval_issue_file(struct issue *ie, struct options *op, struct termios
 static void show_issue(struct options *op);
 
 
+struct item {
+    char *name;     /* name of the option.  */
+    char *value;        /* value of the option.  */
+    char *path;     /* name of config file for this option.  */
+
+    struct item *next;  /* pointer to next option.  */
+};
+
+static struct item *list = NULL;
+
+static void (*logindefs_loader)(void *) = NULL;
+static void *logindefs_loader_data = NULL;
+
+void logindefs_set_loader(void (*loader)(void *data), void *data)
+{
+    logindefs_loader = loader;
+    logindefs_loader_data = data;
+}
+
+static void store(const char *name, const char *value, const char *path)
+{
+    struct item *new = malloc(sizeof(struct item));
+    if (!new)
+        abort();
+
+    if (!name)
+        abort();
+
+    new->name = strdup(name);
+    if (!new->name) abort();
+    if (value && *value) {
+        new->value = strdup(value);
+        if (!new->value) abort();
+    } else {
+        new->value = NULL;
+    }
+    new->path = strdup(path);
+    if (!new->path) abort();
+    new->next = list;
+    list = new;
+}
+
+void logindefs_load_file(const char *filename)
+{
+    FILE *f;
+    char buf[BUFSIZ];
+
+    f = fopen(filename, "r");
+    if (!f)
+        return;
+
+    while (fgets(buf, sizeof(buf), f)) {
+
+        char *p, *name, *data = NULL;
+
+        if (*buf == '#' || *buf == '\n')
+            continue;   /* only comment or empty line */
+
+        p = strchr(buf, '#');
+        if (p)
+            *p = '\0';
+        else {
+            size_t n = strlen(buf);
+            if (n && *(buf + n - 1) == '\n')
+                *(buf + n - 1) = '\0';
+        }
+
+        if (!*buf)
+            continue;   /* empty line */
+
+        /* ignore space at begin of the line */
+        name = buf;
+        while (*name && isspace((unsigned)*name))
+            name++;
+
+        /* go to the end of the name */
+        data = name;
+        while (*data && !(isspace((unsigned)*data) || *data == '='))
+            data++;
+        if (data > name && *data)
+            *data++ = '\0';
+
+        if (!*name || data == name)
+            continue;
+
+        /* go to the begin of the value */
+        while (*data
+               && (isspace((unsigned)*data) || *data == '='
+               || *data == '"'))
+            data++;
+
+        /* remove space at the end of the value */
+        p = data + strlen(data);
+        if (p > data)
+            p--;
+        while (p > data && (isspace((unsigned)*p) || *p == '"'))
+            *p-- = '\0';
+
+        store(name, data, filename);
+    }
+
+    fclose(f);
+}
+
+static void load_defaults(void)
+{
+    if (logindefs_loader)
+        logindefs_loader(logindefs_loader_data);
+    else
+        logindefs_load_file(_PATH_LOGINDEFS);
+}
+
+static struct item *search(const char *name)
+{
+    struct item *ptr;
+
+    if (!list)
+        load_defaults();
+
+    ptr = list;
+    while (ptr != NULL) {
+        if (strcasecmp(name, ptr->name) == 0)
+            return ptr;
+        ptr = ptr->next;
+    }
+
+    return NULL;
+}
+
+int getlogindefs_bool(const char *name, int dflt)
+{
+    struct item *ptr = search(name);
+    return ptr && ptr->value ? (strcasecmp(ptr->value, "yes") == 0) : dflt;
+}
+
 /* Fake hostname for ut_host specified on command line. */
 static char *fakehost;
 
@@ -302,7 +437,7 @@ FILE *dbf;
 # define debug(s) do { ; } while (0)
 #endif
 
-int main(int argc, char **argv)
+int c_main(int argc, char **argv)
 {
     char *username = NULL;          /* login name, given to /bin/login */
     struct chardata chardata;       /* will be set by get_logname() */
@@ -642,6 +777,153 @@ static void output_version(void)
 }
 
 #define is_speed(str) (strlen((str)) == strspn((str), "0123456789,"))
+
+
+int get_terminal_stdfd(void)
+{
+    if (isatty(STDIN_FILENO))
+        return STDIN_FILENO;
+    if (isatty(STDOUT_FILENO))
+        return STDOUT_FILENO;
+    if (isatty(STDERR_FILENO))
+        return STDERR_FILENO;
+
+    return -EINVAL;
+}
+
+int get_terminal_name(const char **path,
+              const char **name,
+              const char **number)
+{
+    const char *tty;
+    const char *p;
+    int fd;
+
+
+    if (name)
+        *name = NULL;
+    if (path)
+        *path = NULL;
+    if (number)
+        *number = NULL;
+
+    fd = get_terminal_stdfd();
+    if (fd < 0)
+        return fd;  /* error */
+
+    tty = ttyname(fd);
+    if (!tty)
+        return -1;
+
+    if (path)
+        *path = tty;
+    if (name || number)
+        tty = strncmp(tty, "/dev/", 5) == 0 ? tty + 5 : tty;
+    if (name)
+        *name = tty;
+    if (number) {
+        for (p = tty; p && *p; p++) {
+            if (isdigit(*p)) {
+                *number = p;
+                break;
+            }
+        }
+    }
+    return 0;
+}
+
+
+static int STRTOXX_EXIT_CODE = EXIT_FAILURE;
+
+
+/*
+ * convert strings to numbers; returns <0 on error, and 0 on success
+ */
+int ul_strtos64(const char *str, int64_t *num, int base)
+{
+    char *end = NULL;
+
+    if (str == NULL || *str == '\0')
+        return -(errno = EINVAL);
+
+    errno = 0;
+    *num = (int64_t) strtoimax(str, &end, base);
+
+    if (errno != 0)
+        return -errno;
+    if (str == end || (end && *end))
+        return -(errno = EINVAL);
+    return 0;
+}
+
+/*
+ * Convert strings to numbers in defined range and print message on error.
+ *
+ * These functions are used when we read input from users (getopt() etc.). It's
+ * better to consolidate the code and keep it all based on 64-bit numbers then
+ * implement it for 32 and 16-bit numbers too.
+ */
+int64_t str2num_or_err(const char *str, int base, const char *errmesg,
+                 int64_t low, int64_t up)
+{
+    int64_t num = 0;
+    int rc;
+
+    rc = ul_strtos64(str, &num, base);
+    if (rc == 0 && ((low && num < low) || (up && num > up)))
+        rc = -(errno = ERANGE);
+
+    if (rc) {
+        if (errno == ERANGE)
+            err(STRTOXX_EXIT_CODE, "%s: '%s'", errmesg, str);
+        errx(STRTOXX_EXIT_CODE, "%s: '%s'", errmesg, str);
+    }
+    return num;
+}
+
+uint64_t str2unum_or_err(const char *str, int base, const char *errmesg, uint64_t up)
+{
+    uint64_t num = 0;
+    int rc;
+
+    rc = ul_strtou64(str, &num, base);
+    if (rc == 0 && (up && num > up))
+        rc = -(errno = ERANGE);
+
+    if (rc) {
+        if (errno == ERANGE)
+            err(STRTOXX_EXIT_CODE, "%s: '%s'", errmesg, str);
+        errx(STRTOXX_EXIT_CODE, "%s: '%s'", errmesg, str);
+    }
+    return num;
+}
+
+int ul_strtou64(const char *str, uint64_t *num, int base)
+{
+    char *end = NULL;
+    int64_t tmp;
+
+    if (str == NULL || *str == '\0')
+        return -(errno = EINVAL);
+
+    /* we need to ignore negative numbers, note that for invalid negative
+     * number strtoimax() returns negative number too, so we do not
+     * need to check errno here */
+    errno = 0;
+    tmp = (int64_t) strtoimax(str, &end, base);
+    if (tmp < 0)
+        errno = ERANGE;
+    else {
+        errno = 0;
+        *num = strtoumax(str, &end, base);
+    }
+
+    if (errno != 0)
+        return -errno;
+    if (str == end || (end && *end))
+        return -(errno = EINVAL);
+    return 0;
+}
 
 /* Parse command-line arguments. */
 static void parse_args(int argc, char **argv, struct options *op)
